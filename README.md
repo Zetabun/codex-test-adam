@@ -10,12 +10,11 @@ A lightweight Three.js demo that renders a lit 3D room with a desk and monitor. 
 - **Space** to jump.
 - **Esc** to unlock and show the overlay.
 
-## Run locally
+## Run
 
-Use any static server. For example:
+No local server is required.
 
-```bash
-python3 -m http.server 4173
-```
+1. Open `index.html` directly in your browser.
+2. Click **Start** to lock pointer and walk around.
 
-Then open `http://localhost:4173`.
+> Note: the page loads Three.js from a CDN, so internet access is required.
