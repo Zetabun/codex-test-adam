@@ -1,0 +1,942 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Single Room with Cabinet</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #0d0f13;
+      color: #fff;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    #game {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      cursor: grab;
+      touch-action: none;
+    }
+    #game.dragging { cursor: grabbing; }
+    #crosshair {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      width: 18px;
+      height: 18px;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      opacity: 0.55;
+      background:
+        linear-gradient(transparent 8px, rgba(255,255,255,0.9) 8px, rgba(255,255,255,0.9) 10px, transparent 10px),
+        linear-gradient(90deg, transparent 8px, rgba(255,255,255,0.9) 8px, rgba(255,255,255,0.9) 10px, transparent 10px);
+    }
+    #minimap {
+      position: fixed;
+      left: 16px;
+      bottom: 16px;
+      width: 160px;
+      height: 160px;
+      border-radius: 12px;
+      background: rgba(0, 0, 0, 0.45);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      pointer-events: none;
+    }
+    .hud, .prompt, .status {
+      position: fixed;
+      left: 16px;
+      border-radius: 12px;
+      background: rgba(0, 0, 0, 0.52);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      backdrop-filter: blur(5px);
+      user-select: none;
+    }
+    .hud {
+      top: 16px;
+      padding: 10px 12px;
+      font-size: 14px;
+      line-height: 1.45;
+      pointer-events: none;
+    }
+    .hud strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 15px;
+    }
+    .prompt {
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      padding: 14px 18px;
+      text-align: center;
+      font-size: 15px;
+      min-width: 320px;
+    }
+    .prompt.hidden, .status.hidden { display: none; }
+    .status {
+      left: auto;
+      right: 16px;
+      top: 16px;
+      padding: 8px 10px;
+      font-size: 13px;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="crosshair"></div>
+  <canvas id="minimap" width="160" height="160"></canvas>
+  <div class="hud">
+    <strong>Single Room</strong>
+    W / S = move forward and back<br>
+    A / D = strafe left and right<br>
+    Mouse = look around<br>
+    Click and drag always works<br>
+    Pointer lock is used when allowed
+  </div>
+  <div class="prompt" id="prompt">Click and drag to start looking around. Pointer lock will be used if available.</div>
+  <div class="status hidden" id="status"></div>
+
+  <script>
+    (function () {
+      const canvas = document.getElementById('game');
+      const promptEl = document.getElementById('prompt');
+      const statusEl = document.getElementById('status');
+      const minimapCanvas = document.getElementById('minimap');
+      const minimapCtx = minimapCanvas.getContext('2d');
+
+      const gl = canvas.getContext('webgl', { antialias: true, alpha: false, depth: true }) ||
+                 canvas.getContext('experimental-webgl');
+
+      if (!gl) {
+        promptEl.textContent = 'WebGL is unavailable in this browser, so this demo cannot render the 3D room.';
+        throw new Error('WebGL not available');
+      }
+
+      const view = { width: window.innerWidth, height: window.innerHeight, dpr: Math.max(1, window.devicePixelRatio || 1) };
+      const world = { width: 10, depth: 10, height: 3.2 };
+      const TILE_SIZE = 0.5;
+
+      const player = { x: 2.1, y: 1.62, z: 2.15, yaw: 0.22, pitch: -0.05, fov: Math.PI / 3.05, radius: 0.22 };
+      const roomBounds = { minX: player.radius, maxX: world.width - player.radius, minZ: player.radius, maxZ: world.depth - player.radius };
+
+      const deskTopBounds = { minX: 5.25, maxX: 7.35, minY: 0.77, maxY: 0.93, minZ: 4.45, maxZ: 5.35 };
+      const chairBounds = { minX: 5.82, maxX: 6.78, minY: 0.0, maxY: 1.2, minZ: 5.52, maxZ: 6.22 };
+      const drawerFrontBounds = { minZ: 5.23, maxZ: 5.32 };
+      const modestyPanelBounds = { minZ: 4.68, maxZ: 4.80 };
+      const monitorScreenBounds = { minX: 5.90, maxX: 6.70, minY: 1.34, maxY: 1.80, minZ: 4.82, maxZ: 4.96 };
+      const trophyCabinetBounds = { minX: 1.05, maxX: 2.95, minY: 0.0, maxY: 3.12, minZ: 8.45, maxZ: 9.12 };
+      const cabinetInteriorTop = 3.00;
+      const cabinetShelfBands = [
+        { minY: 0.82, maxY: 0.88 },
+        { minY: 1.58, maxY: 1.64 },
+        { minY: 2.34, maxY: 2.40 }
+      ];
+      const cabinetTrophies = [
+        { x: 1.48, z: 8.74, baseY: 0.88, scale: 0.78, metal: '#d6b24b', base: '#5e3e22' },
+        { x: 2.52, z: 8.76, baseY: 0.88, scale: 0.90, metal: '#d8c56c', base: '#5a3a1e', accent: '#f1f5fb' },
+        { x: 2.00, z: 8.74, baseY: 1.64, scale: 0.82, metal: '#c6ccd8', base: '#58381c', accent: '#dfe9f6' },
+        { x: 1.40, z: 8.74, baseY: 2.40, scale: 0.74, metal: '#d1ac46', base: '#55361b' },
+        { x: 2.58, z: 8.76, baseY: 2.40, scale: 0.76, metal: '#d1ac46', base: '#55361b' }
+      ];
+      const wallCdConfigs = [
+        { x: 0.10, y: 1.22, z: 1.95, radius: 0.22, thickness: 0.024, axis: 'x', base: '#d6dce6', label: '#8a4bd3' },
+        { x: 0.10, y: 1.56, z: 2.28, radius: 0.22, thickness: 0.024, axis: 'x', base: '#d9e1eb', label: '#4f9ad6' },
+        { x: 0.10, y: 1.90, z: 1.92, radius: 0.22, thickness: 0.024, axis: 'x', base: '#dfe4ec', label: '#d3608f' },
+        { x: 0.10, y: 1.56, z: 1.58, radius: 0.22, thickness: 0.024, axis: 'x', base: '#d4dae3', label: '#d39f44' }
+      ];
+
+      const collisionBoxes = [
+        { minX: 5.15, maxX: 7.45, minZ: 4.35, maxZ: 5.45 },
+        { minX: 5.78, maxX: 6.82, minZ: 5.48, maxZ: 6.26 },
+        { minX: trophyCabinetBounds.minX - 0.04, maxX: trophyCabinetBounds.maxX + 0.04, minZ: trophyCabinetBounds.minZ - 0.04, maxZ: trophyCabinetBounds.maxZ + 0.04 }
+      ];
+
+      const keys = Object.create(null);
+      const inputState = {
+        pointerLocked: false,
+        dragging: false,
+        pointerLockSupported: typeof canvas.requestPointerLock === 'function',
+        pointerLockAllowed: true,
+        lastClientX: 0,
+        lastClientY: 0
+      };
+
+      function setStatus(message, persistent) {
+        statusEl.textContent = message;
+        statusEl.classList.remove('hidden');
+        if (!persistent) {
+          clearTimeout(setStatus.timeoutId);
+          setStatus.timeoutId = setTimeout(function () {
+            statusEl.classList.add('hidden');
+          }, 2200);
+        }
+      }
+      setStatus.timeoutId = 0;
+
+      function updatePrompt() {
+        const active = inputState.pointerLocked || inputState.dragging;
+        promptEl.classList.toggle('hidden', active);
+      }
+
+      function resizeCanvas() {
+        view.width = window.innerWidth;
+        view.height = window.innerHeight;
+        view.dpr = Math.max(1, window.devicePixelRatio || 1);
+        canvas.width = Math.floor(view.width * view.dpr);
+        canvas.height = Math.floor(view.height * view.dpr);
+        canvas.style.width = view.width + 'px';
+        canvas.style.height = view.height + 'px';
+        gl.viewport(0, 0, canvas.width, canvas.height);
+      }
+      resizeCanvas();
+      window.addEventListener('resize', resizeCanvas);
+
+      window.addEventListener('keydown', function (event) { keys[event.key.toLowerCase()] = true; });
+      window.addEventListener('keyup', function (event) { keys[event.key.toLowerCase()] = false; });
+      canvas.addEventListener('contextmenu', function (event) { event.preventDefault(); });
+
+      function clampPitch() {
+        player.pitch = Math.max(-0.72, Math.min(0.72, player.pitch));
+      }
+
+      function applyLookDelta(dx, dy) {
+        const sensitivity = 0.0026;
+        player.yaw += dx * sensitivity;
+        player.pitch -= dy * sensitivity * 0.9;
+        clampPitch();
+      }
+
+      function tryPointerLock() {
+        if (!inputState.pointerLockSupported || !inputState.pointerLockAllowed) return;
+        try {
+          const result = canvas.requestPointerLock();
+          if (result && typeof result.catch === 'function') {
+            result.catch(function () {
+              inputState.pointerLockAllowed = false;
+              setStatus('Pointer lock blocked. Drag to look instead.', true);
+            });
+          }
+        } catch (error) {
+          inputState.pointerLockAllowed = false;
+          setStatus('Pointer lock blocked. Drag to look instead.', true);
+        }
+      }
+
+      canvas.addEventListener('mousedown', function (event) {
+        inputState.dragging = true;
+        inputState.lastClientX = event.clientX;
+        inputState.lastClientY = event.clientY;
+        canvas.classList.add('dragging');
+        updatePrompt();
+        tryPointerLock();
+      });
+      window.addEventListener('mouseup', function () {
+        inputState.dragging = false;
+        canvas.classList.remove('dragging');
+        updatePrompt();
+      });
+      window.addEventListener('mouseleave', function () {
+        inputState.dragging = false;
+        canvas.classList.remove('dragging');
+        updatePrompt();
+      });
+      document.addEventListener('pointerlockchange', function () {
+        inputState.pointerLocked = document.pointerLockElement === canvas;
+        if (inputState.pointerLocked) setStatus('Pointer lock enabled', false);
+        updatePrompt();
+      });
+      document.addEventListener('pointerlockerror', function () {
+        inputState.pointerLockAllowed = false;
+        setStatus('Pointer lock blocked. Drag to look instead.', true);
+        updatePrompt();
+      });
+      document.addEventListener('mousemove', function (event) {
+        if (inputState.pointerLocked) {
+          applyLookDelta(event.movementX, event.movementY);
+          return;
+        }
+        if (!inputState.dragging) return;
+        const dx = event.clientX - inputState.lastClientX;
+        const dy = event.clientY - inputState.lastClientY;
+        inputState.lastClientX = event.clientX;
+        inputState.lastClientY = event.clientY;
+        applyLookDelta(dx, dy);
+      });
+
+      function hexToRgb(hex) {
+        const value = hex.replace('#', '');
+        const expanded = value.length === 3 ? value.split('').map(function (char) { return char + char; }).join('') : value;
+        return {
+          r: parseInt(expanded.slice(0, 2), 16),
+          g: parseInt(expanded.slice(2, 4), 16),
+          b: parseInt(expanded.slice(4, 6), 16)
+        };
+      }
+
+      function hexToRgb01(hex) {
+        const rgb = hexToRgb(hex);
+        return [rgb.r / 255, rgb.g / 255, rgb.b / 255];
+      }
+
+      function scaleColor(color, factor) {
+        return [
+          Math.max(0, Math.min(1, color[0] * factor)),
+          Math.max(0, Math.min(1, color[1] * factor)),
+          Math.max(0, Math.min(1, color[2] * factor))
+        ];
+      }
+
+      function vec3Length(v) { return Math.hypot(v[0], v[1], v[2]); }
+      function normalize(v) {
+        const len = vec3Length(v) || 1;
+        return [v[0] / len, v[1] / len, v[2] / len];
+      }
+      function subtract(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+      function cross(a, b) {
+        return [
+          a[1] * b[2] - a[2] * b[1],
+          a[2] * b[0] - a[0] * b[2],
+          a[0] * b[1] - a[1] * b[0]
+        ];
+      }
+      function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+      function computeNormal(a, b, c) { return normalize(cross(subtract(b, a), subtract(c, a))); }
+
+      function circleIntersectsAABB(x, z, radius, box) {
+        const nearestX = Math.max(box.minX, Math.min(x, box.maxX));
+        const nearestZ = Math.max(box.minZ, Math.min(z, box.maxZ));
+        const dx = x - nearestX;
+        const dz = z - nearestZ;
+        return dx * dx + dz * dz < radius * radius;
+      }
+
+      function collides(x, z) {
+        if (x < roomBounds.minX || x > roomBounds.maxX || z < roomBounds.minZ || z > roomBounds.maxZ) return true;
+        for (let i = 0; i < collisionBoxes.length; i++) {
+          if (circleIntersectsAABB(x, z, player.radius, collisionBoxes[i])) return true;
+        }
+        return false;
+      }
+
+      function movePlayer(dt) {
+        const moveSpeed = 3.15 * dt;
+        const turnSpeed = 1.9 * dt;
+        const forwardX = Math.cos(player.yaw);
+        const forwardZ = Math.sin(player.yaw);
+        const rightX = Math.cos(player.yaw + Math.PI / 2);
+        const rightZ = Math.sin(player.yaw + Math.PI / 2);
+        let moveX = 0;
+        let moveZ = 0;
+        if (keys.w) { moveX += forwardX * moveSpeed; moveZ += forwardZ * moveSpeed; }
+        if (keys.s) { moveX -= forwardX * moveSpeed; moveZ -= forwardZ * moveSpeed; }
+        if (keys.a) { moveX -= rightX * moveSpeed; moveZ -= rightZ * moveSpeed; }
+        if (keys.d) { moveX += rightX * moveSpeed; moveZ += rightZ * moveSpeed; }
+        if (keys.arrowleft) player.yaw -= turnSpeed;
+        if (keys.arrowright) player.yaw += turnSpeed;
+        if (keys.arrowup) player.pitch = Math.min(0.72, player.pitch + turnSpeed * 0.6);
+        if (keys.arrowdown) player.pitch = Math.max(-0.72, player.pitch - turnSpeed * 0.6);
+        const nextX = player.x + moveX;
+        const nextZ = player.z + moveZ;
+        if (!collides(nextX, player.z)) player.x = nextX;
+        if (!collides(player.x, nextZ)) player.z = nextZ;
+      }
+
+      function mat4Perspective(fovy, aspect, near, far) {
+        const f = 1 / Math.tan(fovy / 2);
+        const nf = 1 / (near - far);
+        return new Float32Array([
+          f / aspect, 0, 0, 0,
+          0, f, 0, 0,
+          0, 0, (far + near) * nf, -1,
+          0, 0, (2 * far * near) * nf, 0
+        ]);
+      }
+
+      function mat4LookAt(eye, target, up) {
+        const zAxis = normalize(subtract(eye, target));
+        const xAxis = normalize(cross(up, zAxis));
+        const yAxis = cross(zAxis, xAxis);
+        return new Float32Array([
+          xAxis[0], yAxis[0], zAxis[0], 0,
+          xAxis[1], yAxis[1], zAxis[1], 0,
+          xAxis[2], yAxis[2], zAxis[2], 0,
+          -dot(xAxis, eye), -dot(yAxis, eye), -dot(zAxis, eye), 1
+        ]);
+      }
+
+      function getForwardVector() {
+        return normalize([
+          Math.cos(player.pitch) * Math.cos(player.yaw),
+          Math.sin(player.pitch),
+          Math.cos(player.pitch) * Math.sin(player.yaw)
+        ]);
+      }
+
+      function compileShader(type, source) {
+        const shader = gl.createShader(type);
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+          throw new Error(gl.getShaderInfoLog(shader) || 'Shader compilation failed');
+        }
+        return shader;
+      }
+
+      function createProgram(vertexSource, fragmentSource) {
+        const program = gl.createProgram();
+        const vertexShader = compileShader(gl.VERTEX_SHADER, vertexSource);
+        const fragmentShader = compileShader(gl.FRAGMENT_SHADER, fragmentSource);
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+          throw new Error(gl.getProgramInfoLog(program) || 'Program linking failed');
+        }
+        return program;
+      }
+
+      const vertexSource = [
+        'attribute vec3 aPosition;',
+        'attribute vec3 aNormal;',
+        'attribute vec3 aColor;',
+        'uniform mat4 uProjection;',
+        'uniform mat4 uView;',
+        'uniform vec3 uLightDir;',
+        'uniform vec3 uPointLightA;',
+        'uniform vec3 uPointLightB;',
+        'varying vec3 vColor;',
+        'varying vec3 vNormal;',
+        'varying float vLight;',
+        'varying float vPointLight;',
+        'varying float vSpec;',
+        'varying float vDistance;',
+        'void main() {',
+        '  vec4 viewPos = uView * vec4(aPosition, 1.0);',
+        '  gl_Position = uProjection * viewPos;',
+        '  vec3 normal = normalize(aNormal);',
+        '  vec3 toLightA = uPointLightA - aPosition;',
+        '  vec3 toLightB = uPointLightB - aPosition;',
+        '  float dA = length(toLightA);',
+        '  float dB = length(toLightB);',
+        '  float pointA = max(dot(normal, normalize(toLightA)), 0.0) / (1.0 + 0.28 * dA * dA);',
+        '  float pointB = max(dot(normal, normalize(toLightB)), 0.0) / (1.0 + 0.34 * dB * dB);',
+        '  vec3 viewDir = normalize(-viewPos.xyz);',
+        '  vec3 halfVec = normalize(normalize(-uLightDir) + viewDir);',
+        '  vSpec = pow(max(dot(normal, halfVec), 0.0), 30.0);',
+        '  vLight = max(dot(normal, normalize(-uLightDir)), 0.0);',
+        '  vPointLight = pointA * 4.2 + pointB * 3.0;',
+        '  vNormal = normal;',
+        '  vColor = aColor;',
+        '  vDistance = length(viewPos.xyz);',
+        '}'
+      ].join('\n');
+
+      const fragmentSource = [
+        'precision mediump float;',
+        'varying vec3 vColor;',
+        'varying vec3 vNormal;',
+        'varying float vLight;',
+        'varying float vPointLight;',
+        'varying float vSpec;',
+        'varying float vDistance;',
+        'uniform vec3 uFogColor;',
+        'uniform float uAlpha;',
+        'uniform float uGlassMode;',
+        'void main() {',
+        '  float diffuse = 0.28 + vLight * 0.62 + vPointLight;',
+        '  vec3 litColor = vColor * diffuse + vec3(vSpec * (uGlassMode > 0.5 ? 0.95 : 0.25));',
+        '  if (uGlassMode > 0.5) {',
+        '    litColor = mix(litColor, vec3(0.72, 0.88, 0.98), 0.32);',
+        '  }',
+        '  float fog = smoothstep(6.0, 15.0, vDistance);',
+        '  vec3 finalColor = mix(litColor, uFogColor, fog);',
+        '  gl_FragColor = vec4(finalColor, uAlpha);',
+        '}'
+      ].join('\n');
+
+      const program = createProgram(vertexSource, fragmentSource);
+      gl.useProgram(program);
+
+      const attribLocations = {
+        position: gl.getAttribLocation(program, 'aPosition'),
+        normal: gl.getAttribLocation(program, 'aNormal'),
+        color: gl.getAttribLocation(program, 'aColor')
+      };
+      const uniformLocations = {
+        projection: gl.getUniformLocation(program, 'uProjection'),
+        view: gl.getUniformLocation(program, 'uView'),
+        lightDir: gl.getUniformLocation(program, 'uLightDir'),
+        pointLightA: gl.getUniformLocation(program, 'uPointLightA'),
+        pointLightB: gl.getUniformLocation(program, 'uPointLightB'),
+        fogColor: gl.getUniformLocation(program, 'uFogColor'),
+        alpha: gl.getUniformLocation(program, 'uAlpha'),
+        glassMode: gl.getUniformLocation(program, 'uGlassMode')
+      };
+
+      function createGeometryBuilder() {
+        return {
+          positions: [], normals: [], colors: [],
+          pushVertex: function (position, normal, color) {
+            this.positions.push(position[0], position[1], position[2]);
+            this.normals.push(normal[0], normal[1], normal[2]);
+            this.colors.push(color[0], color[1], color[2]);
+          },
+          pushTriangle: function (a, b, c, color, normal) {
+            const n = normal || computeNormal(a, b, c);
+            this.pushVertex(a, n, color);
+            this.pushVertex(b, n, color);
+            this.pushVertex(c, n, color);
+          },
+          pushQuad: function (a, b, c, d, color, normal) {
+            this.pushTriangle(a, b, c, color, normal);
+            this.pushTriangle(a, c, d, color, normal);
+          }
+        };
+      }
+
+      function pushBox(builder, bounds, palette) {
+        const x1 = bounds.minX, x2 = bounds.maxX, y1 = bounds.minY, y2 = bounds.maxY, z1 = bounds.minZ, z2 = bounds.maxZ;
+        const base = hexToRgb01(palette.base);
+        const top = scaleColor(base, 1.08);
+        const bottom = scaleColor(base, 0.55);
+        const front = scaleColor(base, palette.frontFactor || 1);
+        const back = scaleColor(base, palette.backFactor || 0.78);
+        const left = scaleColor(base, palette.leftFactor || 0.88);
+        const right = scaleColor(base, palette.rightFactor || 0.94);
+        builder.pushQuad([x1,y2,z1],[x2,y2,z1],[x2,y1,z1],[x1,y1,z1], front, [0,0,-1]);
+        builder.pushQuad([x2,y2,z2],[x1,y2,z2],[x1,y1,z2],[x2,y1,z2], back, [0,0,1]);
+        builder.pushQuad([x1,y2,z2],[x1,y2,z1],[x1,y1,z1],[x1,y1,z2], left, [-1,0,0]);
+        builder.pushQuad([x2,y2,z1],[x2,y2,z2],[x2,y1,z2],[x2,y1,z1], right, [1,0,0]);
+        builder.pushQuad([x1,y2,z2],[x2,y2,z2],[x2,y2,z1],[x1,y2,z1], top, [0,1,0]);
+        builder.pushQuad([x1,y1,z1],[x2,y1,z1],[x2,y1,z2],[x1,y1,z2], bottom, [0,-1,0]);
+      }
+
+      function pushWedge(builder, config) {
+        const x1 = config.minX, x2 = config.maxX, z1 = config.minZ, z2 = config.maxZ;
+        const y1 = config.minY, yFront = config.maxYFront, yBack = config.maxYBack;
+        const base = hexToRgb01(config.base);
+        const p1 = [x1,y1,z1], p2 = [x2,y1,z1], p3 = [x2,y1,z2], p4 = [x1,y1,z2];
+        const p5 = [x1,yFront,z1], p6 = [x2,yFront,z1], p7 = [x2,yBack,z2], p8 = [x1,yBack,z2];
+        builder.pushQuad(p1,p2,p3,p4, scaleColor(base,0.55), [0,-1,0]);
+        builder.pushQuad(p5,p6,p7,p8, scaleColor(base,1.08));
+        builder.pushQuad(p2,p1,p5,p6, scaleColor(base,0.88), [0,0,-1]);
+        builder.pushQuad(p4,p3,p7,p8, scaleColor(base,0.75), [0,0,1]);
+        builder.pushQuad(p1,p4,p8,p5, scaleColor(base,0.82));
+        builder.pushQuad(p3,p2,p6,p7, scaleColor(base,0.92));
+      }
+
+      function pushCylinder(builder, config) {
+        const color = hexToRgb01(config.base);
+        const sideColor = scaleColor(color, config.sideFactor || 0.95);
+        const topColor = scaleColor(color, config.topFactor || 1.08);
+        const bottomColor = scaleColor(color, config.bottomFactor || 0.58);
+        const sides = config.sides || 10;
+        for (let i = 0; i < sides; i++) {
+          const a1 = (i / sides) * Math.PI * 2;
+          const a2 = ((i + 1) / sides) * Math.PI * 2;
+          const x1 = config.x + Math.cos(a1) * config.radius;
+          const z1 = config.z + Math.sin(a1) * config.radius;
+          const x2 = config.x + Math.cos(a2) * config.radius;
+          const z2 = config.z + Math.sin(a2) * config.radius;
+          const mid = (a1 + a2) * 0.5;
+          const normal = [Math.cos(mid), 0, Math.sin(mid)];
+          builder.pushQuad([x1,config.maxY,z1],[x2,config.maxY,z2],[x2,config.minY,z2],[x1,config.minY,z1], sideColor, normal);
+          builder.pushTriangle([config.x,config.maxY,config.z],[x1,config.maxY,z1],[x2,config.maxY,z2], topColor, [0,1,0]);
+          builder.pushTriangle([config.x,config.minY,config.z],[x2,config.minY,z2],[x1,config.minY,z1], bottomColor, [0,-1,0]);
+        }
+      }
+
+      function pushDisc(builder, config) {
+        const color = hexToRgb01(config.base);
+        const frontColor = scaleColor(color, config.frontFactor || 1.06);
+        const backColor = scaleColor(color, config.backFactor || 0.76);
+        const edgeColor = scaleColor(color, config.edgeFactor || 0.88);
+        const sides = config.sides || 20;
+        const radius = config.radius;
+        const halfThickness = (config.thickness || 0.02) * 0.5;
+
+        for (let i = 0; i < sides; i++) {
+          const a1 = (i / sides) * Math.PI * 2;
+          const a2 = ((i + 1) / sides) * Math.PI * 2;
+          const c1 = Math.cos(a1);
+          const s1 = Math.sin(a1);
+          const c2 = Math.cos(a2);
+          const s2 = Math.sin(a2);
+          const mid = (a1 + a2) * 0.5;
+
+          if (config.axis === 'x') {
+            const frontCenter = [config.x + halfThickness, config.y, config.z];
+            const backCenter = [config.x - halfThickness, config.y, config.z];
+            const p1f = [config.x + halfThickness, config.y + c1 * radius, config.z + s1 * radius];
+            const p2f = [config.x + halfThickness, config.y + c2 * radius, config.z + s2 * radius];
+            const p1b = [config.x - halfThickness, config.y + c1 * radius, config.z + s1 * radius];
+            const p2b = [config.x - halfThickness, config.y + c2 * radius, config.z + s2 * radius];
+            const rimNormal = [0, Math.cos(mid), Math.sin(mid)];
+            builder.pushTriangle(frontCenter, p1f, p2f, frontColor, [1, 0, 0]);
+            builder.pushTriangle(backCenter, p2b, p1b, backColor, [-1, 0, 0]);
+            builder.pushQuad(p1f, p2f, p2b, p1b, edgeColor, rimNormal);
+          } else {
+            const frontCenter = [config.x, config.y, config.z + halfThickness];
+            const backCenter = [config.x, config.y, config.z - halfThickness];
+            const p1f = [config.x + c1 * radius, config.y + s1 * radius, config.z + halfThickness];
+            const p2f = [config.x + c2 * radius, config.y + s2 * radius, config.z + halfThickness];
+            const p1b = [config.x + c1 * radius, config.y + s1 * radius, config.z - halfThickness];
+            const p2b = [config.x + c2 * radius, config.y + s2 * radius, config.z - halfThickness];
+            const rimNormal = [Math.cos(mid), Math.sin(mid), 0];
+            builder.pushTriangle(frontCenter, p1f, p2f, frontColor, [0, 0, 1]);
+            builder.pushTriangle(backCenter, p2b, p1b, backColor, [0, 0, -1]);
+            builder.pushQuad(p1f, p2f, p2b, p1b, edgeColor, rimNormal);
+          }
+        }
+      }
+
+      function addRoom(builder) {
+        const floorA = hexToRgb01('#696253');
+        const floorB = hexToRgb01('#736c5d');
+        const ceilingA = hexToRgb01('#2e3440');
+        const ceilingB = hexToRgb01('#313846');
+        for (let z = 0; z < world.depth; z += TILE_SIZE) {
+          for (let x = 0; x < world.width; x += TILE_SIZE) {
+            const x2 = Math.min(world.width, x + TILE_SIZE);
+            const z2 = Math.min(world.depth, z + TILE_SIZE);
+            const even = ((x / TILE_SIZE) + (z / TILE_SIZE)) % 2 === 0;
+            builder.pushQuad([x,0,z],[x2,0,z],[x2,0,z2],[x,0,z2], even ? floorA : floorB, [0,1,0]);
+            builder.pushQuad([x,world.height,z2],[x2,world.height,z2],[x2,world.height,z],[x,world.height,z], even ? ceilingA : ceilingB, [0,-1,0]);
+          }
+        }
+        builder.pushQuad([0,world.height,0],[0,0,0],[world.width,0,0],[world.width,world.height,0], hexToRgb01('#8392a4'), [0,0,1]);
+        builder.pushQuad([world.width,world.height,world.depth],[world.width,0,world.depth],[0,0,world.depth],[0,world.height,world.depth], hexToRgb01('#748191'), [0,0,-1]);
+        builder.pushQuad([0,world.height,world.depth],[0,0,world.depth],[0,0,0],[0,world.height,0], hexToRgb01('#6f7d8d'), [1,0,0]);
+        builder.pushQuad([world.width,world.height,0],[world.width,0,0],[world.width,0,world.depth],[world.width,world.height,world.depth], hexToRgb01('#647181'), [-1,0,0]);
+      }
+
+      function addRoomDetails(builder) {
+        pushBox(builder, { minX:0, maxX:world.width, minY:0, maxY:0.12, minZ:0, maxZ:0.08 }, { base:'#7b8797' });
+        pushBox(builder, { minX:0, maxX:world.width, minY:0, maxY:0.12, minZ:world.depth-0.08, maxZ:world.depth }, { base:'#6f7c8b' });
+        pushBox(builder, { minX:0, maxX:0.08, minY:0, maxY:0.12, minZ:0, maxZ:world.depth }, { base:'#6f7c8b' });
+        pushBox(builder, { minX:world.width-0.08, maxX:world.width, minY:0, maxY:0.12, minZ:0, maxZ:world.depth }, { base:'#687484' });
+        pushBox(builder, { minX:0, maxX:world.width, minY:world.height-0.08, maxY:world.height, minZ:0, maxZ:0.08 }, { base:'#58616f' });
+        pushBox(builder, { minX:0, maxX:world.width, minY:world.height-0.08, maxY:world.height, minZ:world.depth-0.08, maxZ:world.depth }, { base:'#515966' });
+        pushBox(builder, { minX:0, maxX:0.08, minY:world.height-0.08, maxY:world.height, minZ:0, maxZ:world.depth }, { base:'#515966' });
+        pushBox(builder, { minX:world.width-0.08, maxX:world.width, minY:world.height-0.08, maxY:world.height, minZ:0, maxZ:world.depth }, { base:'#4b535f' });
+        pushBox(builder, { minX:1.3, maxX:3.9, minY:1.15, maxY:2.35, minZ:0.02, maxZ:0.10 }, { base:'#2b3038' });
+        pushBox(builder, { minX:1.42, maxX:3.78, minY:1.27, maxY:2.23, minZ:0.03, maxZ:0.09 }, { base:'#9e6b47' });
+        pushBox(builder, { minX:1.56, maxX:3.64, minY:1.41, maxY:2.09, minZ:0.04, maxZ:0.08 }, { base:'#5f7a95' });
+      }
+
+      function addWallCDs(builder) {
+        for (let i = 0; i < wallCdConfigs.length; i++) {
+          const cd = wallCdConfigs[i];
+          pushDisc(builder, cd);
+          pushDisc(builder, {
+            x: cd.x + 0.014,
+            y: cd.y,
+            z: cd.z,
+            radius: cd.radius * 0.38,
+            thickness: cd.thickness * 0.42,
+            axis: cd.axis,
+            base: cd.label,
+            frontFactor: 1.02,
+            backFactor: 0.9,
+            edgeFactor: 0.92,
+            sides: 18
+          });
+          pushBox(builder, {
+            minX: cd.x - 0.01,
+            maxX: cd.x + 0.01,
+            minY: cd.y - 0.01,
+            maxY: cd.y + 0.01,
+            minZ: cd.z - 0.01,
+            maxZ: cd.z + 0.01
+          }, { base: '#cfd6df' });
+        }
+      }
+
+      function addDesk(builder) {
+        pushBox(builder, deskTopBounds, { base:'#b67a46' });
+        pushBox(builder, { minX:5.25, maxX:7.35, minY:0.71, maxY:0.77, minZ:4.52, maxZ:4.62 }, { base:'#9a6638' });
+        pushBox(builder, { minX:5.25, maxX:7.35, minY:0.71, maxY:0.77, minZ:5.20, maxZ:5.34 }, { base:'#a46d3d' });
+        pushBox(builder, { minX:5.36, maxX:5.90, minY:0.02, maxY:0.72, minZ:4.66, maxZ:5.23 }, { base:'#7d502d' });
+        pushBox(builder, { minX:6.70, maxX:7.22, minY:0.02, maxY:0.72, minZ:4.66, maxZ:5.23 }, { base:'#7d502d' });
+        pushBox(builder, { minX:5.40, maxX:5.86, minY:0.14, maxY:0.68, minZ:drawerFrontBounds.minZ, maxZ:drawerFrontBounds.maxZ }, { base:'#936238' });
+        pushBox(builder, { minX:6.74, maxX:7.18, minY:0.50, maxY:0.68, minZ:drawerFrontBounds.minZ, maxZ:drawerFrontBounds.maxZ }, { base:'#936238' });
+        pushBox(builder, { minX:6.74, maxX:7.18, minY:0.28, maxY:0.46, minZ:drawerFrontBounds.minZ, maxZ:drawerFrontBounds.maxZ }, { base:'#936238' });
+        pushBox(builder, { minX:6.74, maxX:7.18, minY:0.06, maxY:0.24, minZ:drawerFrontBounds.minZ, maxZ:drawerFrontBounds.maxZ }, { base:'#936238' });
+        pushBox(builder, { minX:5.58, maxX:6.98, minY:0.16, maxY:0.74, minZ:modestyPanelBounds.minZ, maxZ:modestyPanelBounds.maxZ }, { base:'#7f532f' });
+        pushBox(builder, { minX:5.42, maxX:5.60, minY:0.00, maxY:0.77, minZ:4.58, maxZ:4.76 }, { base:'#7a4d28' });
+        pushBox(builder, { minX:7.00, maxX:7.18, minY:0.00, maxY:0.77, minZ:4.58, maxZ:4.76 }, { base:'#7a4d28' });
+        pushBox(builder, { minX:5.42, maxX:5.60, minY:0.00, maxY:0.77, minZ:5.02, maxZ:5.20 }, { base:'#7a4d28' });
+        pushBox(builder, { minX:7.00, maxX:7.18, minY:0.00, maxY:0.77, minZ:5.02, maxZ:5.20 }, { base:'#7a4d28' });
+        pushBox(builder, { minX:6.10, maxX:6.50, minY:0.93, maxY:1.06, minZ:4.76, maxZ:5.06 }, { base:'#404853' });
+        pushBox(builder, { minX:6.26, maxX:6.34, minY:1.06, maxY:1.34, minZ:4.87, maxZ:4.95 }, { base:'#5b6572' });
+        pushBox(builder, monitorScreenBounds, { base:'#2a313b', frontFactor:0.38, backFactor:2.1, leftFactor:0.55, rightFactor:0.55 });
+        pushBox(builder, { minX:5.98, maxX:6.62, minY:1.40, maxY:1.74, minZ:4.94, maxZ:4.96 }, { base:'#7fdfff', frontFactor:0.3, backFactor:1.8, leftFactor:0.4, rightFactor:0.4 });
+        pushWedge(builder, { minX:5.97, maxX:6.58, minY:0.93, maxYFront:0.95, maxYBack:0.99, minZ:5.04, maxZ:5.24, base:'#2b3038' });
+      }
+
+      function addChair(builder) {
+        pushBox(builder, { minX:5.86, maxX:6.74, minY:0.42, maxY:0.54, minZ:5.56, maxZ:6.16 }, { base:'#3c434d' });
+        pushWedge(builder, { minX:5.92, maxX:6.68, minY:0.54, maxYFront:1.08, maxYBack:1.18, minZ:6.04, maxZ:6.18, base:'#49515c' });
+        pushBox(builder, { minX:5.92, maxX:6.02, minY:0.00, maxY:0.42, minZ:5.60, maxZ:5.70 }, { base:'#2b3038' });
+        pushBox(builder, { minX:6.58, maxX:6.68, minY:0.00, maxY:0.42, minZ:5.60, maxZ:5.70 }, { base:'#2b3038' });
+        pushBox(builder, { minX:5.92, maxX:6.02, minY:0.00, maxY:0.42, minZ:6.02, maxZ:6.12 }, { base:'#2b3038' });
+        pushBox(builder, { minX:6.58, maxX:6.68, minY:0.00, maxY:0.42, minZ:6.02, maxZ:6.12 }, { base:'#2b3038' });
+      }
+
+      function addTrophy(builder, config) {
+        const s = config.scale || 1;
+        const baseColor = config.base || '#5d3b1f';
+        const metalColor = config.metal || '#d5b24b';
+        const accentColor = config.accent || '#dfe7f2';
+        const x = config.x, z = config.z, y = config.baseY;
+        pushBox(builder, { minX:x-0.13*s, maxX:x+0.13*s, minY:y, maxY:y+0.05*s, minZ:z-0.10*s, maxZ:z+0.10*s }, { base:baseColor });
+        pushCylinder(builder, { x:x, z:z, minY:y+0.05*s, maxY:y+0.11*s, radius:0.045*s, sides:10, base:metalColor });
+        pushCylinder(builder, { x:x, z:z, minY:y+0.11*s, maxY:y+0.28*s, radius:0.03*s, sides:10, base:metalColor });
+        pushCylinder(builder, { x:x, z:z, minY:y+0.28*s, maxY:y+0.42*s, radius:0.085*s, sides:12, base:metalColor });
+        pushCylinder(builder, { x:x, z:z, minY:y+0.42*s, maxY:y+0.53*s, radius:0.12*s, sides:12, base:metalColor });
+        pushBox(builder, { minX:x-0.18*s, maxX:x-0.11*s, minY:y+0.34*s, maxY:y+0.45*s, minZ:z-0.025*s, maxZ:z+0.025*s }, { base:metalColor });
+        pushBox(builder, { minX:x+0.11*s, maxX:x+0.18*s, minY:y+0.34*s, maxY:y+0.45*s, minZ:z-0.025*s, maxZ:z+0.025*s }, { base:metalColor });
+        pushCylinder(builder, { x:x, z:z, minY:y+0.59*s, maxY:y+0.67*s, radius:0.025*s, sides:8, base:accentColor });
+      }
+
+      function getTrophyTopY(config) {
+        return config.baseY + 0.67 * (config.scale || 1);
+      }
+
+      function addTrophyCabinet(builder, glassBuilder) {
+        const x1 = trophyCabinetBounds.minX, x2 = trophyCabinetBounds.maxX, z1 = trophyCabinetBounds.minZ, z2 = trophyCabinetBounds.maxZ;
+        const wood = '#815a34', darkWood = '#6f4c2d', glass = '#9cb7cd', trim = 0.10;
+        pushBox(builder, { minX:x1, maxX:x2, minY:0.00, maxY:0.12, minZ:z1, maxZ:z2 }, { base:darkWood });
+        pushBox(builder, { minX:x1, maxX:x2, minY:cabinetInteriorTop, maxY:trophyCabinetBounds.maxY, minZ:z1, maxZ:z2 }, { base:wood });
+        pushBox(builder, { minX:x1, maxX:x1+trim, minY:0.12, maxY:cabinetInteriorTop, minZ:z1, maxZ:z2 }, { base:wood });
+        pushBox(builder, { minX:x2-trim, maxX:x2, minY:0.12, maxY:cabinetInteriorTop, minZ:z1, maxZ:z2 }, { base:wood });
+        pushBox(builder, { minX:x1, maxX:x2, minY:0.12, maxY:cabinetInteriorTop, minZ:z2-0.05, maxZ:z2 }, { base:'#6b737c' });
+
+        for (let i = 0; i < cabinetShelfBands.length; i++) {
+          const shelf = cabinetShelfBands[i];
+          pushBox(builder, { minX:x1+0.08, maxX:x2-0.08, minY:shelf.minY, maxY:shelf.maxY, minZ:z1+0.05, maxZ:z2-0.05 }, { base:darkWood });
+        }
+
+        pushBox(builder, { minX:x1+0.92, maxX:x1+1.00, minY:0.12, maxY:cabinetInteriorTop, minZ:z1+0.02, maxZ:z1+0.08 }, { base:wood });
+        pushBox(builder, { minX:x1, maxX:x2, minY:trophyCabinetBounds.maxY, maxY:trophyCabinetBounds.maxY + 0.06, minZ:z1-0.02, maxZ:z2+0.02 }, { base:'#94704a' });
+        pushBox(glassBuilder, { minX:x1+0.10, maxX:x1+0.90, minY:0.16, maxY:cabinetInteriorTop - 0.04, minZ:z1, maxZ:z1+0.02 }, { base:glass, frontFactor:1.1, backFactor:0.92, leftFactor:1.0, rightFactor:1.0 });
+        pushBox(glassBuilder, { minX:x1+1.00, maxX:x2-0.10, minY:0.16, maxY:cabinetInteriorTop - 0.04, minZ:z1, maxZ:z1+0.02 }, { base:glass, frontFactor:1.1, backFactor:0.92, leftFactor:1.0, rightFactor:1.0 });
+
+        for (let i = 0; i < cabinetTrophies.length; i++) {
+          addTrophy(builder, cabinetTrophies[i]);
+        }
+      }
+
+      function buildSceneGeometry(includeDetails) {
+        const opaque = createGeometryBuilder();
+        const glass = createGeometryBuilder();
+        addRoom(opaque);
+        if (includeDetails !== false) {
+          addRoomDetails(opaque);
+          addDesk(opaque);
+          addChair(opaque);
+          addTrophyCabinet(opaque, glass);
+          addWallCDs(opaque);
+        }
+        return {
+          opaque: {
+            positions: new Float32Array(opaque.positions),
+            normals: new Float32Array(opaque.normals),
+            colors: new Float32Array(opaque.colors),
+            vertexCount: opaque.positions.length / 3
+          },
+          glass: {
+            positions: new Float32Array(glass.positions),
+            normals: new Float32Array(glass.normals),
+            colors: new Float32Array(glass.colors),
+            vertexCount: glass.positions.length / 3
+          }
+        };
+      }
+
+      const scene = buildSceneGeometry(true);
+
+      function createBuffer(data) {
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+        return buffer;
+      }
+
+      function createMesh(geometry) {
+        return {
+          position: createBuffer(geometry.positions),
+          normal: createBuffer(geometry.normals),
+          color: createBuffer(geometry.colors),
+          vertexCount: geometry.vertexCount
+        };
+      }
+
+      function bindAttribute(buffer, location) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.enableVertexAttribArray(location);
+        gl.vertexAttribPointer(location, 3, gl.FLOAT, false, 0, 0);
+      }
+
+      function drawMesh(mesh, alpha, isGlass) {
+        if (!mesh || mesh.vertexCount === 0) return;
+        bindAttribute(mesh.position, attribLocations.position);
+        bindAttribute(mesh.normal, attribLocations.normal);
+        bindAttribute(mesh.color, attribLocations.color);
+        gl.uniform1f(uniformLocations.alpha, alpha);
+        gl.uniform1f(uniformLocations.glassMode, isGlass ? 1.0 : 0.0);
+        gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
+      }
+
+      const opaqueMesh = createMesh(scene.opaque);
+      const glassMesh = createMesh(scene.glass);
+
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.clearColor(0.13, 0.14, 0.17, 1.0);
+
+      function renderMiniMap() {
+        const w = minimapCanvas.width;
+        const h = minimapCanvas.height;
+        minimapCtx.clearRect(0, 0, w, h);
+        minimapCtx.fillStyle = '#262c35';
+        minimapCtx.fillRect(0, 0, w, h);
+        const padding = 12;
+        const scaleX = (w - padding * 2) / world.width;
+        const scaleZ = (h - padding * 2) / world.depth;
+        minimapCtx.strokeStyle = 'rgba(255,255,255,0.12)';
+        minimapCtx.lineWidth = 1;
+        for (let x = 0; x <= world.width; x += 1) {
+          const px = padding + x * scaleX;
+          minimapCtx.beginPath();
+          minimapCtx.moveTo(px, padding);
+          minimapCtx.lineTo(px, h - padding);
+          minimapCtx.stroke();
+        }
+        for (let z = 0; z <= world.depth; z += 1) {
+          const pz = padding + z * scaleZ;
+          minimapCtx.beginPath();
+          minimapCtx.moveTo(padding, pz);
+          minimapCtx.lineTo(w - padding, pz);
+          minimapCtx.stroke();
+        }
+        minimapCtx.strokeStyle = '#9aa7b7';
+        minimapCtx.lineWidth = 2;
+        minimapCtx.strokeRect(padding, padding, world.width * scaleX, world.depth * scaleZ);
+        minimapCtx.fillStyle = '#9c683d';
+        minimapCtx.fillRect(padding + deskTopBounds.minX * scaleX, padding + deskTopBounds.minZ * scaleZ,
+          (deskTopBounds.maxX - deskTopBounds.minX) * scaleX, (deskTopBounds.maxZ - deskTopBounds.minZ) * scaleZ);
+        minimapCtx.fillStyle = '#414955';
+        minimapCtx.fillRect(padding + chairBounds.minX * scaleX, padding + chairBounds.minZ * scaleZ,
+          (chairBounds.maxX - chairBounds.minX) * scaleX, (chairBounds.maxZ - chairBounds.minZ) * scaleZ);
+        minimapCtx.fillStyle = '#6f5336';
+        minimapCtx.fillRect(padding + trophyCabinetBounds.minX * scaleX, padding + trophyCabinetBounds.minZ * scaleZ,
+          (trophyCabinetBounds.maxX - trophyCabinetBounds.minX) * scaleX, (trophyCabinetBounds.maxZ - trophyCabinetBounds.minZ) * scaleZ);
+        const px = padding + player.x * scaleX;
+        const pz = padding + player.z * scaleZ;
+        minimapCtx.fillStyle = '#67ffab';
+        minimapCtx.beginPath();
+        minimapCtx.arc(px, pz, 4, 0, Math.PI * 2);
+        minimapCtx.fill();
+        minimapCtx.strokeStyle = '#67ffab';
+        minimapCtx.lineWidth = 2;
+        minimapCtx.beginPath();
+        minimapCtx.moveTo(px, pz);
+        minimapCtx.lineTo(px + Math.cos(player.yaw) * 14, pz + Math.sin(player.yaw) * 14);
+        minimapCtx.stroke();
+      }
+
+      function renderScene() {
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        const projection = mat4Perspective(player.fov, canvas.width / canvas.height, 0.05, 50);
+        const forward = getForwardVector();
+        const eye = [player.x, player.y, player.z];
+        const target = [player.x + forward[0], player.y + forward[1], player.z + forward[2]];
+        const viewMatrix = mat4LookAt(eye, target, [0, 1, 0]);
+        gl.uniformMatrix4fv(uniformLocations.projection, false, projection);
+        gl.uniformMatrix4fv(uniformLocations.view, false, viewMatrix);
+        gl.uniform3fv(uniformLocations.lightDir, new Float32Array(normalize([0.5, 1.0, 0.35])));
+        gl.uniform3fv(uniformLocations.pointLightA, new Float32Array([6.30, 2.35, 4.95]));
+        gl.uniform3fv(uniformLocations.pointLightB, new Float32Array([2.00, 2.75, 8.80]));
+        gl.uniform3fv(uniformLocations.fogColor, new Float32Array([0.11, 0.12, 0.15]));
+
+        gl.disable(gl.BLEND);
+        gl.depthMask(true);
+        drawMesh(opaqueMesh, 1.0, false);
+
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(false);
+        drawMesh(glassMesh, 0.18, true);
+        gl.depthMask(true);
+        gl.disable(gl.BLEND);
+
+        renderMiniMap();
+      }
+
+      function runTests() {
+        const results = [];
+        function assert(name, condition) {
+          if (!condition) throw new Error(name);
+          results.push(name);
+        }
+
+        const rgb = hexToRgb('#abc');
+        assert('hexToRgb expands short hex', rgb.r === 170 && rgb.g === 187 && rgb.b === 204);
+        assert('collision detects desk area', collides(6.2, 4.9) === true);
+        assert('collision detects chair area', collides(6.2, 5.9) === true);
+        assert('collision detects trophy cabinet area', collides(2.0, 8.8) === true);
+        assert('collision allows open floor', collides(2.5, 2.5) === false);
+        assert('normalize returns unit length', Math.abs(vec3Length(normalize([3, 0, 4])) - 1) < 0.0001);
+        assert('perspective matrix stays finite', Array.from(mat4Perspective(Math.PI / 3, 1.5, 0.05, 50)).every(Number.isFinite));
+        assert('opaque geometry has triangles', scene.opaque.vertexCount > 0 && scene.opaque.vertexCount % 3 === 0);
+        assert('glass geometry exists', scene.glass.vertexCount > 0 && scene.glass.vertexCount % 3 === 0);
+
+        const simpleScene = buildSceneGeometry(false);
+        const fullVertexCount = scene.opaque.vertexCount + scene.glass.vertexCount;
+        const simpleVertexCount = simpleScene.opaque.vertexCount + simpleScene.glass.vertexCount;
+        assert('geometry complexity increased', fullVertexCount > simpleVertexCount);
+        assert('geometry complexity increase is meaningful', fullVertexCount - simpleVertexCount > 100);
+
+        const cylinderBuilder = createGeometryBuilder();
+        pushCylinder(cylinderBuilder, { x: 0, z: 0, minY: 0, maxY: 1, radius: 0.5, sides: 8, base: '#ffffff' });
+        assert('cylinder helper emits geometry', cylinderBuilder.positions.length > 0 && cylinderBuilder.positions.length % 9 === 0);
+
+        const discBuilder = createGeometryBuilder();
+        pushDisc(discBuilder, { x: 0.1, y: 1, z: 1, radius: 0.2, thickness: 0.02, axis: 'x', base: '#ffffff', sides: 12 });
+        assert('disc helper emits geometry', discBuilder.positions.length > 0 && discBuilder.positions.length % 9 === 0);
+
+        assert('drawer fronts stay on chair side', drawerFrontBounds.minZ > (deskTopBounds.minZ + deskTopBounds.maxZ) * 0.5);
+        assert('modesty panel stays on rear side', modestyPanelBounds.maxZ < (deskTopBounds.minZ + deskTopBounds.maxZ) * 0.5);
+        assert('trophy cabinet sits beyond the desk', trophyCabinetBounds.minZ > deskTopBounds.maxZ);
+        assert('cabinet has three shelf bands', cabinetShelfBands.length === 3);
+        assert('lower trophies fit below middle shelf', getTrophyTopY(cabinetTrophies[0]) < cabinetShelfBands[1].minY && getTrophyTopY(cabinetTrophies[1]) < cabinetShelfBands[1].minY);
+        assert('middle trophy fits below top shelf', getTrophyTopY(cabinetTrophies[2]) < cabinetShelfBands[2].minY);
+        assert('top trophies fit below cabinet top', getTrophyTopY(cabinetTrophies[3]) < cabinetInteriorTop && getTrophyTopY(cabinetTrophies[4]) < cabinetInteriorTop);
+        assert('wall CDs exist', wallCdConfigs.length >= 3);
+        assert('wall CDs are mounted near the left wall', wallCdConfigs.every(function (cd) { return cd.x > 0 && cd.x < 0.2 && cd.axis === 'x'; }));
+
+        console.log('Self-tests passed:', results);
+      }
+
+      runTests();
+      updatePrompt();
+
+      let lastTime = performance.now();
+      function frame(now) {
+        const dt = Math.min(0.033, (now - lastTime) / 1000);
+        lastTime = now;
+        movePlayer(dt);
+        renderScene();
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>
