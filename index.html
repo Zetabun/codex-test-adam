@@ -37,12 +37,14 @@
         cursor: pointer;
       }
       .hint { opacity: 0.88; }
+      #status { min-height: 1.2em; font-size: 0.95rem; color: #bae6fd; opacity: 0.95; }
     </style>
   </head>
   <body>
     <div id="overlay">
       <h1>Canvas 3D Room</h1>
       <div class="hint">Click Start • WASD / Arrows move • Mouse look • Esc unlock</div>
+      <div id="status"></div>
       <button id="start">Start</button>
     </div>
     <canvas id="view"></canvas>
@@ -52,6 +54,7 @@
       const ctx = canvas.getContext('2d');
       const overlay = document.getElementById('overlay');
       const startBtn = document.getElementById('start');
+      const statusText = document.getElementById('status');
 
       const ROOM_W = 14;
       const ROOM_H = 10;
@@ -66,7 +69,8 @@
         moveR: false,
         turnL: false,
         turnR: false,
-        pointerLocked: false
+        pointerLocked: false,
+        started: false
       };
 
       const objects = [
@@ -239,6 +243,7 @@
       }
 
       function update(dt) {
+        if (!state.started) return;
         const moveSpeed = 2.9;
         const turnSpeed = 2.2;
 
@@ -281,9 +286,32 @@
       document.addEventListener('keydown', (e) => setKey(e.code, true));
       document.addEventListener('keyup', (e) => setKey(e.code, false));
 
+      function tryPointerLock() {
+        if (!canvas.requestPointerLock) {
+          statusText.textContent = 'Pointer lock is unavailable here. Use arrow keys to look around.';
+          return;
+        }
+
+        const result = canvas.requestPointerLock();
+        if (result && typeof result.catch === 'function') {
+          result.catch(() => {
+            statusText.textContent = 'Mouse look blocked. Use arrow keys to turn, or click the canvas to try again.';
+          });
+        }
+      }
+
       document.addEventListener('pointerlockchange', () => {
         state.pointerLocked = document.pointerLockElement === canvas;
-        overlay.classList.toggle('hidden', state.pointerLocked);
+        if (state.pointerLocked) {
+          overlay.classList.add('hidden');
+          statusText.textContent = '';
+        } else if (!state.started) {
+          overlay.classList.remove('hidden');
+        }
+      });
+
+      document.addEventListener('pointerlockerror', () => {
+        statusText.textContent = 'Mouse look blocked. Use arrow keys to turn, or click the canvas to try again.';
       });
 
       document.addEventListener('mousemove', (e) => {
@@ -291,9 +319,16 @@
         state.angle += e.movementX * 0.0024;
       });
 
-      startBtn.addEventListener('click', () => canvas.requestPointerLock());
+      startBtn.addEventListener('click', () => {
+        state.started = true;
+        overlay.classList.add('hidden');
+        statusText.textContent = '';
+        tryPointerLock();
+      });
+
       canvas.addEventListener('click', () => {
-        if (!state.pointerLocked) canvas.requestPointerLock();
+        if (!state.started) return;
+        if (!state.pointerLocked) tryPointerLock();
       });
 
       let prev = performance.now();
