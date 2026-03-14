@@ -1,20 +1,21 @@
-# Three.js 3D Room Walkthrough
+# Canvas 3D Room Walkthrough
 
-A lightweight Three.js demo that renders a lit 3D room with a desk and monitor. You can walk around the room in first person.
-
-## Controls
-
-- Click **Start** (or click the canvas) to lock the mouse.
-- **W/A/S/D** or arrow keys to move.
-- Move mouse to look around.
-- **Space** to jump.
-- **Esc** to unlock and show the overlay.
+A self-contained 3D-style room demo implemented with the HTML5 Canvas 2D API (raycasting style). No build step and no local server are required.
 
 ## Run
 
-No local server is required.
-
 1. Open `index.html` directly in your browser.
-2. Click **Start** to lock pointer and walk around.
+2. Click **Start** to lock the pointer.
 
-> Note: the page loads Three.js from a CDN, so internet access is required.
+## Controls
+
+- **W / S** or **↑ / ↓**: move forward/back
+- **A / D**: strafe left/right
+- **← / →**: rotate (keyboard look)
+- **Mouse**: look around while pointer is locked
+- **Esc**: unlock pointer and show overlay
+
+## Notes
+
+- The room includes a desk/monitor area and distance-based lighting effects.
+- Everything is in one file, so this works from `file://` without hosting.
