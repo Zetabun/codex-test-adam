@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Canvas 3D Room Walkthrough</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #0b1020;
+        color: #fff;
+        font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #overlay {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-content: center;
+        text-align: center;
+        gap: 0.75rem;
+        background: rgba(6, 12, 24, 0.68);
+        backdrop-filter: blur(2px);
+      }
+      #overlay.hidden { display: none; }
+      button {
+        justify-self: center;
+        border: 0;
+        border-radius: 8px;
+        padding: 0.65rem 1.1rem;
+        font-weight: 700;
+        background: #38bdf8;
+        color: #082f49;
+        cursor: pointer;
+      }
+      .hint { opacity: 0.88; }
+      #status { min-height: 1.2em; font-size: 0.95rem; color: #bae6fd; opacity: 0.95; }
+    </style>
+  </head>
+  <body>
+    <div id="overlay">
+      <h1>Canvas 3D Room</h1>
+      <div class="hint">Click Start • WASD / Arrows move • Mouse look • Esc unlock</div>
+      <div id="status"></div>
+      <button id="start">Start</button>
+    </div>
+    <canvas id="view"></canvas>
+
+    <script>
+      const canvas = document.getElementById('view');
+      const ctx = canvas.getContext('2d');
+      const overlay = document.getElementById('overlay');
+      const startBtn = document.getElementById('start');
+      const statusText = document.getElementById('status');
+
+      const ROOM_W = 14;
+      const ROOM_H = 10;
+
+      const state = {
+        x: 2.4,
+        y: 5,
+        angle: 0,
+        moveF: false,
+        moveB: false,
+        moveL: false,
+        moveR: false,
+        turnL: false,
+        turnR: false,
+        pointerLocked: false,
+        started: false
+      };
+
+      const objects = [
+        { x: 8.9, y: 4.8, w: 2.0, h: 0.9, color: '#6b4f35', glow: 0.0 }, // desk top
+        { x: 8.1, y: 4.45, w: 0.15, h: 0.75, color: '#543d2b', glow: 0.0 },
+        { x: 9.7, y: 4.45, w: 0.15, h: 0.75, color: '#543d2b', glow: 0.0 },
+        { x: 8.1, y: 5.15, w: 0.15, h: 0.75, color: '#543d2b', glow: 0.0 },
+        { x: 9.7, y: 5.15, w: 0.15, h: 0.75, color: '#543d2b', glow: 0.0 },
+        { x: 9.05, y: 4.78, w: 0.3, h: 0.25, color: '#2b313c', glow: 0.0 }, // monitor stand
+        { x: 9.05, y: 4.78, w: 0.7, h: 0.06, color: '#171b23', glow: 0.0 }, // monitor base
+        { x: 9.05, y: 4.45, w: 0.84, h: 0.08, color: '#111317', glow: 0.0 }, // monitor frame shell
+        { x: 9.05, y: 4.45, w: 0.72, h: 0.04, color: '#7dd6ff', glow: 0.45 } // screen strip glow
+      ];
+
+      const walls = [
+        [0, 0, ROOM_W, 0],
+        [ROOM_W, 0, ROOM_W, ROOM_H],
+        [ROOM_W, ROOM_H, 0, ROOM_H],
+        [0, ROOM_H, 0, 0]
+      ];
+
+      // Add box-object edges as walls for collision + occlusion.
+      for (const o of objects) {
+        const hw = o.w / 2;
+        const hh = o.h / 2;
+        const x0 = o.x - hw;
+        const x1 = o.x + hw;
+        const y0 = o.y - hh;
+        const y1 = o.y + hh;
+        walls.push([x0, y0, x1, y0], [x1, y0, x1, y1], [x1, y1, x0, y1], [x0, y1, x0, y0]);
+      }
+
+      function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.floor(window.innerWidth * dpr);
+        canvas.height = Math.floor(window.innerHeight * dpr);
+      }
+      resize();
+      window.addEventListener('resize', resize);
+
+      function intersectRaySeg(ox, oy, dx, dy, x1, y1, x2, y2) {
+        const rpx = ox;
+        const rpy = oy;
+        const rdx = dx;
+        const rdy = dy;
+        const spx = x1;
+        const spy = y1;
+        const sdx = x2 - x1;
+        const sdy = y2 - y1;
+
+        const denom = rdx * sdy - rdy * sdx;
+        if (Math.abs(denom) < 1e-8) return null;
+
+        const t = ((spx - rpx) * sdy - (spy - rpy) * sdx) / denom;
+        const u = ((spx - rpx) * rdy - (spy - rpy) * rdx) / denom;
+
+        if (t >= 0 && u >= 0 && u <= 1) {
+          return { t, x: rpx + rdx * t, y: rpy + rdy * t };
+        }
+        return null;
+      }
+
+      function castRay(angle) {
+        const dx = Math.cos(angle);
+        const dy = Math.sin(angle);
+        let best = null;
+
+        for (const seg of walls) {
+          const hit = intersectRaySeg(state.x, state.y, dx, dy, seg[0], seg[1], seg[2], seg[3]);
+          if (!hit) continue;
+          if (!best || hit.t < best.t) {
+            best = { ...hit, seg };
+          }
+        }
+        return best;
+      }
+
+      function distanceToLight(x, y) {
+        // Ceiling light + desk lamp style falloff.
+        const d1 = Math.hypot(x - 7.0, y - 5.0);
+        const d2 = Math.hypot(x - 9.0, y - 4.5);
+        const l1 = Math.max(0, 1.0 - d1 / 8.0);
+        const l2 = Math.max(0, 1.0 - d2 / 3.2);
+        return Math.min(1, 0.2 + l1 * 0.55 + l2 * 0.75);
+      }
+
+      function canMove(nx, ny) {
+        const pad = 0.22;
+        if (nx < pad || ny < pad || nx > ROOM_W - pad || ny > ROOM_H - pad) return false;
+        for (const o of objects) {
+          const hw = o.w / 2 + 0.16;
+          const hh = o.h / 2 + 0.16;
+          if (nx > o.x - hw && nx < o.x + hw && ny > o.y - hh && ny < o.y + hh) return false;
+        }
+        return true;
+      }
+
+      function shade(hex, factor, glow = 0) {
+        const n = parseInt(hex.slice(1), 16);
+        let r = (n >> 16) & 255;
+        let g = (n >> 8) & 255;
+        let b = n & 255;
+        const lit = factor + glow;
+        r = Math.min(255, Math.max(0, Math.floor(r * lit)));
+        g = Math.min(255, Math.max(0, Math.floor(g * lit)));
+        b = Math.min(255, Math.max(0, Math.floor(b * lit)));
+        return `rgb(${r}, ${g}, ${b})`;
+      }
+
+      function render() {
+        const w = canvas.width;
+        const h = canvas.height;
+        const horizon = Math.floor(h * 0.5);
+
+        // Ceiling and floor gradients for "lit" ambience.
+        const ceiling = ctx.createLinearGradient(0, 0, 0, horizon);
+        ceiling.addColorStop(0, '#1a2442');
+        ceiling.addColorStop(1, '#0f1630');
+        ctx.fillStyle = ceiling;
+        ctx.fillRect(0, 0, w, horizon);
+
+        const floor = ctx.createLinearGradient(0, horizon, 0, h);
+        floor.addColorStop(0, '#273451');
+        floor.addColorStop(1, '#151d30');
+        ctx.fillStyle = floor;
+        ctx.fillRect(0, horizon, w, h - horizon);
+
+        const fov = Math.PI / 3;
+        const rays = Math.max(260, Math.floor(w / 3));
+        const step = w / rays;
+
+        for (let i = 0; i < rays; i++) {
+          const x = i * step;
+          const camX = (i / rays) * 2 - 1;
+          const rayAngle = state.angle + Math.atan(camX * Math.tan(fov / 2));
+          const hit = castRay(rayAngle);
+          if (!hit) continue;
+
+          const correctedDist = hit.t * Math.cos(rayAngle - state.angle);
+          const wallHeight = Math.min(h * 0.95, (h * 0.92) / Math.max(0.0001, correctedDist));
+          const yTop = (h - wallHeight) / 2;
+
+          const light = distanceToLight(hit.x, hit.y);
+          const distFalloff = Math.max(0.17, 1.4 / (1 + correctedDist * correctedDist * 0.16));
+          const seg = hit.seg;
+          const horizontal = Math.abs(seg[1] - seg[3]) < 1e-4;
+          const baseShade = horizontal ? 0.95 : 0.75;
+
+          let color = shade('#5f6f94', baseShade * distFalloff * light);
+
+          // Highlight monitor screen object with cyan glow.
+          for (const o of objects) {
+            const hw = o.w / 2;
+            const hh = o.h / 2;
+            if (hit.x > o.x - hw - 0.001 && hit.x < o.x + hw + 0.001 && hit.y > o.y - hh - 0.001 && hit.y < o.y + hh + 0.001) {
+              color = shade(o.color, 0.9 * distFalloff * light + 0.2, o.glow);
+              break;
+            }
+          }
+
+          ctx.fillStyle = color;
+          ctx.fillRect(x, yTop, step + 1, wallHeight);
+
+          // simple floor light bloom near desk lamp
+          if (light > 0.75 && correctedDist < 2.7) {
+            ctx.fillStyle = `rgba(126, 202, 255, ${(light - 0.72) * 0.12})`;
+            ctx.fillRect(x, yTop + wallHeight, step + 1, h - (yTop + wallHeight));
+          }
+        }
+      }
+
+      function update(dt) {
+        if (!state.started) return;
+        const moveSpeed = 2.9;
+        const turnSpeed = 2.2;
+
+        if (state.turnL) state.angle -= turnSpeed * dt;
+        if (state.turnR) state.angle += turnSpeed * dt;
+
+        let mx = 0;
+        let my = 0;
+        const fx = Math.cos(state.angle);
+        const fy = Math.sin(state.angle);
+        const sx = Math.cos(state.angle + Math.PI / 2);
+        const sy = Math.sin(state.angle + Math.PI / 2);
+
+        if (state.moveF) { mx += fx; my += fy; }
+        if (state.moveB) { mx -= fx; my -= fy; }
+        if (state.moveR) { mx += sx; my += sy; }
+        if (state.moveL) { mx -= sx; my -= sy; }
+
+        const len = Math.hypot(mx, my);
+        if (len > 0) {
+          mx = (mx / len) * moveSpeed * dt;
+          my = (my / len) * moveSpeed * dt;
+
+          const nx = state.x + mx;
+          const ny = state.y + my;
+          if (canMove(nx, state.y)) state.x = nx;
+          if (canMove(state.x, ny)) state.y = ny;
+        }
+      }
+
+      function setKey(code, down) {
+        if (code === 'KeyW' || code === 'ArrowUp') state.moveF = down;
+        if (code === 'KeyS' || code === 'ArrowDown') state.moveB = down;
+        if (code === 'KeyA') state.moveL = down;
+        if (code === 'KeyD') state.moveR = down;
+        if (code === 'ArrowLeft') state.turnL = down;
+        if (code === 'ArrowRight') state.turnR = down;
+      }
+
+      document.addEventListener('keydown', (e) => setKey(e.code, true));
+      document.addEventListener('keyup', (e) => setKey(e.code, false));
+
+      function tryPointerLock() {
+        if (!canvas.requestPointerLock) {
+          statusText.textContent = 'Pointer lock is unavailable here. Use arrow keys to look around.';
+          return;
+        }
+
+        const result = canvas.requestPointerLock();
+        if (result && typeof result.catch === 'function') {
+          result.catch(() => {
+            statusText.textContent = 'Mouse look blocked. Use arrow keys to turn, or click the canvas to try again.';
+          });
+        }
+      }
+
+      document.addEventListener('pointerlockchange', () => {
+        state.pointerLocked = document.pointerLockElement === canvas;
+        if (state.pointerLocked) {
+          overlay.classList.add('hidden');
+          statusText.textContent = '';
+        } else if (!state.started) {
+          overlay.classList.remove('hidden');
+        }
+      });
+
+      document.addEventListener('pointerlockerror', () => {
+        statusText.textContent = 'Mouse look blocked. Use arrow keys to turn, or click the canvas to try again.';
+      });
+
+      document.addEventListener('mousemove', (e) => {
+        if (!state.pointerLocked) return;
+        state.angle += e.movementX * 0.0024;
+      });
+
+      startBtn.addEventListener('click', () => {
+        state.started = true;
+        overlay.classList.add('hidden');
+        statusText.textContent = '';
+        tryPointerLock();
+      });
+
+      canvas.addEventListener('click', () => {
+        if (!state.started) return;
+        if (!state.pointerLocked) tryPointerLock();
+      });
+
+      let prev = performance.now();
+      function frame(now) {
+        const dt = Math.min(0.04, (now - prev) / 1000);
+        prev = now;
+        update(dt);
+        render();
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
